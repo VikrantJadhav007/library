@@ -13,7 +13,7 @@ def init_db():
     conn = get_connection()
     c = conn.cursor()
 
-    # --- Tables ---
+    # --- Users table ---
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -23,6 +23,7 @@ def init_db():
         )
     """)
 
+    # --- Books table ---
     c.execute("""
         CREATE TABLE IF NOT EXISTS books (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,6 +36,7 @@ def init_db():
         )
     """)
 
+    # --- Borrow table ---
     c.execute("""
         CREATE TABLE IF NOT EXISTS borrow (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,7 +92,7 @@ def add_book(title, author, category, total_copies):
         conn.commit()
         return True
     except sqlite3.IntegrityError:
-        return False  # Duplicate book
+        return False
     finally:
         conn.close()
 
@@ -137,13 +139,12 @@ def get_all_books(search=""):
 def request_borrow(user_id, book_id):
     conn = get_connection()
     c = conn.cursor()
-    # Check if already pending or borrowed
     c.execute("""
         SELECT * FROM borrow WHERE user_id=? AND book_id=? AND status IN ('Pending', 'Borrowed')
     """, (user_id, book_id))
     if c.fetchone():
         conn.close()
-        return False  # Already requested
+        return False
     borrowed_date = datetime.now().strftime("%Y-%m-%d")
     due_date = (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d")
     c.execute("""
@@ -198,9 +199,9 @@ def get_user_requests(user_id):
     conn = get_connection()
     df = pd.read_sql(f"""
         SELECT br.id AS request_id,
-               bk.id AS book_id,
-               bk.title,
+               bk.title AS book_title,
                bk.author,
+               bk.category,
                br.borrowed_date,
                br.due_date,
                br.status
@@ -216,9 +217,10 @@ def get_all_requests():
     conn = get_connection()
     df = pd.read_sql("""
         SELECT br.id AS request_id,
-               u.username AS member,
-               bk.title,
+               u.username AS member_name,
+               bk.title AS book_title,
                bk.author,
+               bk.category,
                br.borrowed_date,
                br.due_date,
                br.status
@@ -233,7 +235,7 @@ def get_all_requests():
 # =====================================================
 # Streamlit UI
 # =====================================================
-st.set_page_config(page_title="📚 Library System", layout="centered")
+st.set_page_config(page_title="📚 महर्षी वेद व्यास सार्वजनिक ग्रंथालय", layout="centered")
 init_db()
 
 # --- CSS ---
@@ -252,17 +254,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown("<h1 class='title'>📚 महर्षी वेद व्यास सार्वजनिक ग्रंथालय, खानापूर, ता. वाई, जि. सातारा </h1>", unsafe_allow_html=True)
-#st.markdown("<p class='subtitle'>Streamlit + SQLite | Admin & Member Portal</p>", unsafe_allow_html=True)
 
 if "user" not in st.session_state:
     st.session_state.user = None
 
-# Auto redirect
-if st.session_state.user:
-    default_menu = "Dashboard"
-else:
-    default_menu = "Login"
-
+default_menu = "Dashboard" if st.session_state.user else "Login"
 menu = ["Login", "Register", "Dashboard"]
 choice = st.sidebar.selectbox("📖 Menu", menu, index=menu.index(default_menu))
 
@@ -312,11 +308,11 @@ elif choice == "Dashboard":
             st.rerun()
 
         if user["role"] == "admin":
-            tab1, tab2, tab3 = st.tabs(["📚 Books", "📘 Borrow Requests", "➕ Add Book"])
+            tab1, tab2, tab3, tab4 = st.tabs(["📚 Books", "📘 Borrow Requests", "➕ Add Book", "👥 Members"])
         else:
             tab1, tab2 = st.tabs(["📚 Books", "📘 My Requests"])
 
-        # --- BOOKS TAB ---
+        # ------------------- BOOKS -------------------
         with tab1:
             st.subheader("📚 Books")
             search = st.text_input("🔍 Search by title, author, or category")
@@ -341,76 +337,65 @@ elif choice == "Dashboard":
                 with col2:
                     if st.button("Delete Book"):
                         delete_book(book_id)
-                        st.success("🗑️ Book deleted successfully!")
+                        st.success("🗑 Book deleted successfully!")
                         st.rerun()
-
-            if user["role"] == "member":
-                st.markdown("### Request Borrow Book")
-                book_id = st.number_input("Enter Book ID to Request Borrow", min_value=1, step=1)
+            else:
+                st.markdown("### Borrow a Book")
+                book_id = st.number_input("Enter Book ID to Borrow", min_value=1, step=1)
                 if st.button("Request Borrow"):
-                    success = request_borrow(user["id"], book_id)
-                    if success:
-                        st.success("📥 Borrow request sent! Waiting for admin approval.")
+                    if request_borrow(user["id"], book_id):
+                        st.success("✅ Borrow request submitted!")
                         st.rerun()
                     else:
-                        st.warning("⚠️ You already have a pending or borrowed request for this book.")
+                        st.error("❌ Already requested or borrowed.")
 
-        # --- MEMBER REQUEST TAB ---
-        if user["role"] == "member":
-            with tab2:
-                st.subheader("📘 My Borrow Requests")
-                requests = get_user_requests(user["id"])
-                def color_status(status):
-                    return f"<span class='status-{status.lower()}'>{status}</span>"
-                if not requests.empty:
-                    requests_display = requests.copy()
-                    requests_display["Status"] = requests_display["status"].apply(lambda x: color_status(x))
-                    requests_display = requests_display.drop(columns=["status"])
-                    st.write(requests_display.to_html(escape=False, index=False), unsafe_allow_html=True)
-
-                    st.markdown("### Return Book")
-                    borrow_ids = requests[requests['status'] == 'Borrowed']['request_id'].tolist()
-                    if borrow_ids:
-                        return_id = st.selectbox("Select Book to Return", borrow_ids)
-                        if st.button("Return Book"):
-                            if mark_returned(return_id):
-                                st.success("📗 Book returned successfully!")
-                                st.rerun()
-                else:
-                    st.info("No borrow requests yet.")
-
-        # --- ADMIN REQUEST TAB ---
+        # ------------------- BORROW REQUESTS -------------------
         if user["role"] == "admin":
             with tab2:
-                st.subheader("📘 All Borrow Requests")
-                requests = get_all_requests()
-                if not requests.empty:
-                    def color_status(status):
-                        return f"<span class='status-{status.lower()}'>{status}</span>"
-                    requests_display = requests.copy()
-                    requests_display["Status"] = requests_display["status"].apply(lambda x: color_status(x))
-                    requests_display = requests_display.drop(columns=["status"])
-                    st.write(requests_display.to_html(escape=False, index=False), unsafe_allow_html=True)
-
-                    st.markdown("### Approve/Reject Requests")
-                    borrow_ids = requests[requests['status'] == 'Pending']['request_id'].tolist()
-                    if borrow_ids:
-                        selected_id = st.selectbox("Select Request ID", borrow_ids)
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            if st.button("Approve Request"):
-                                if approve_request(selected_id):
-                                    st.success("✅ Request approved and book borrowed!")
-                                    st.rerun()
-                                else:
-                                    st.error("No available copies!")
-                        with col2:
-                            if st.button("Reject Request"):
-                                reject_request(selected_id)
-                                st.success("❌ Request rejected!")
+                st.subheader("📘 Borrow Requests")
+                df = get_all_requests()
+                for _, row in df.iterrows():
+                    status_class = f"status-{row['status'].lower()}"
+                    st.markdown(
+                        f"**Member:** {row['member_name']}  |  **Book:** {row['book_title']} ({row['author']})  |  "
+                        f"**Category:** {row['category']}  |  **Borrowed:** {row['borrowed_date']}  |  "
+                        f"**Due:** {row['due_date']}  |  <span class='{status_class}'>{row['status']}</span>",
+                        unsafe_allow_html=True
+                    )
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        if row['status'] == "Pending" and st.button(f"Approve {row['request_id']}", key=f"approve{row['request_id']}"):
+                            if approve_request(row['request_id']):
+                                st.success("Approved!")
                                 st.rerun()
+                    with col2:
+                        if row['status'] == "Pending" and st.button(f"Reject {row['request_id']}", key=f"reject{row['request_id']}"):
+                            reject_request(row['request_id'])
+                            st.success("Rejected!")
+                            st.rerun()
+                    with col3:
+                        if row['status'] == "Borrowed" and st.button(f"Returned {row['request_id']}", key=f"return{row['request_id']}"):
+                            if mark_returned(row['request_id']):
+                                st.success("Marked as returned!")
+                                st.rerun()
+        else:
+            with tab2:
+                st.subheader("📘 My Borrow Requests")
+                df = get_user_requests(user["id"])
+                for _, row in df.iterrows():
+                    status_class = f"status-{row['status'].lower()}"
+                    st.markdown(
+                        f"**Book:** {row['book_title']} ({row['author']})  |  "
+                        f"**Category:** {row['category']}  |  **Borrowed:** {row['borrowed_date']}  |  "
+                        f"**Due:** {row['due_date']}  |  <span class='{status_class}'>{row['status']}</span>",
+                        unsafe_allow_html=True
+                    )
+                    if row['status'] == "Borrowed" and st.button(f"Return {row['request_id']}", key=f"return_user{row['request_id']}"):
+                        if mark_returned(row['request_id']):
+                            st.success("Marked as returned!")
+                            st.rerun()
 
-        # --- ADD BOOK TAB ---
+        # ------------------- ADD BOOK (Admin) -------------------
         if user["role"] == "admin":
             with tab3:
                 st.subheader("➕ Add New Book")
@@ -423,4 +408,13 @@ elif choice == "Dashboard":
                         st.success("✅ Book added successfully!")
                         st.rerun()
                     else:
-                        st.error("Book already exists.")
+                        st.error("Error: Book already exists.")
+
+        # ------------------- MEMBERS (Admin) -------------------
+        if user["role"] == "admin":
+            with tab4:
+                st.subheader("👥 Registered Members")
+                conn = get_connection()
+                df_members = pd.read_sql("SELECT id, username, role FROM users ORDER BY id ASC", conn)
+                conn.close()
+                st.dataframe(df_members, use_container_width=True)
