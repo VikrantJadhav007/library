@@ -62,16 +62,30 @@ def init_db():
 # Utility functions
 # =====================================================
 def add_user(username, password, role="member"):
+    if not username.strip():  # prevent blank member name
+        return "blank"
     conn = get_connection()
     c = conn.cursor()
     try:
-        c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", (username, password, role))
+        c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", (username.strip(), password, role))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
         return False
     finally:
         conn.close()
+
+def reset_password(username, new_password):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE username=?", (username,))
+    if not c.fetchone():
+        conn.close()
+        return False
+    c.execute("UPDATE users SET password=? WHERE username=?", (new_password, username))
+    conn.commit()
+    conn.close()
+    return True
 
 def login_user(username, password):
     conn = get_connection()
@@ -238,7 +252,6 @@ def get_all_requests():
 st.set_page_config(page_title="📚 महर्षी वेद व्यास सार्वजनिक ग्रंथालय ", layout="centered")
 init_db()
 
-# --- CSS ---
 st.markdown("""
 <style>
 * {font-family:'Helvetica Neue',sans-serif;}
@@ -286,7 +299,10 @@ elif choice == "Register" and not st.session_state.user:
     username = st.text_input("Choose Username")
     password = st.text_input("Choose Password", type="password")
     if st.button("Register"):
-        if add_user(username, password):
+        result = add_user(username, password)
+        if result == "blank":
+            st.error("⚠️ Member name cannot be blank.")
+        elif result:
             user = login_user(username, password)
             st.session_state.user = {"id": user[0], "username": user[1], "role": user[3]}
             st.success("🎉 Account created! Redirecting to dashboard...")
@@ -303,16 +319,30 @@ elif choice == "Dashboard":
     else:
         user = st.session_state.user
         st.sidebar.markdown(f"👤 **{user['username']} ({user['role']})**")
+
         if st.sidebar.button("🚪 Logout"):
             st.session_state.user = None
             st.rerun()
 
+        # Reset password section (after login)
+        with st.sidebar.expander("🔑 Reset My Password"):
+            st.text_input("Username", value=user["username"], disabled=True)
+            new_password = st.text_input("Enter New Password", type="password")
+            if st.button("Update Password"):
+                if reset_password(user["username"], new_password):
+                    st.success("✅ Password updated successfully!")
+                else:
+                    st.error("❌ Error updating password.")
+
+        # Admin tabs vs Member tabs
         if user["role"] == "admin":
-            tab1, tab2, tab3, tab4 = st.tabs(["📚 Books", "📘 Borrow Requests", "➕ Add Book", "👥 Members"])
+            tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                "📚 Books", "📘 Borrow Requests", "➕ Add Book", "👥 Members", "📊 Borrow Report"
+            ])
         else:
             tab1, tab2 = st.tabs(["📚 Books", "📘 My Requests"])
 
-        # ------------------- BOOKS -------------------
+        # --- Books ---
         with tab1:
             st.subheader("📚 Books")
             search = st.text_input("🔍 Search by title, author, or category")
@@ -321,7 +351,7 @@ elif choice == "Dashboard":
 
             if user["role"] == "admin":
                 st.markdown("### Edit/Delete Book")
-                book_id = st.number_input("Enter Book ID to Edit/Delete", min_value=1, step=1)
+                book_id = st.number_input("Enter Book ID", min_value=1, step=1)
                 new_title = st.text_input("New Title")
                 new_author = st.text_input("New Author")
                 new_category = st.text_input("New Category")
@@ -333,7 +363,7 @@ elif choice == "Dashboard":
                             st.success("✅ Book updated successfully!")
                             st.rerun()
                         else:
-                            st.error("Error: duplicate or invalid book ID.")
+                            st.error("Error updating book.")
                 with col2:
                     if st.button("Delete Book"):
                         delete_book(book_id)
@@ -349,7 +379,7 @@ elif choice == "Dashboard":
                     else:
                         st.error("❌ Already requested or borrowed.")
 
-        # ------------------- BORROW REQUESTS -------------------
+        # --- Borrow Requests ---
         if user["role"] == "admin":
             with tab2:
                 st.subheader("📘 Borrow Requests")
@@ -395,7 +425,7 @@ elif choice == "Dashboard":
                             st.success("Marked as returned!")
                             st.rerun()
 
-        # ------------------- ADD BOOK (Admin) -------------------
+        # --- Add Book (Admin) ---
         if user["role"] == "admin":
             with tab3:
                 st.subheader("➕ Add New Book")
@@ -410,7 +440,7 @@ elif choice == "Dashboard":
                     else:
                         st.error("Error: Book already exists.")
 
-        # ------------------- MEMBERS (Admin) -------------------
+        # --- Members (Admin) ---
         if user["role"] == "admin":
             with tab4:
                 st.subheader("👥 Registered Members")
@@ -418,3 +448,24 @@ elif choice == "Dashboard":
                 df_members = pd.read_sql("SELECT id, username, role FROM users ORDER BY id ASC", conn)
                 conn.close()
                 st.dataframe(df_members, use_container_width=True)
+
+                st.markdown("### ➕ Enroll New Member (Default password: mvvg@2025)")
+                new_member = st.text_input("Enter Member Name")
+                if st.button("Enroll Member"):
+                    result = add_user(new_member, "mvvg@2025")
+                    if result == "blank":
+                        st.error("⚠️ Member name cannot be blank.")
+                    elif result:
+                        st.success("✅ Member enrolled successfully!")
+                        st.rerun()
+                    else:
+                        st.error("⚠️ Member already exists.")
+
+        # --- Borrow Report (Admin) ---
+        if user["role"] == "admin":
+            with tab5:
+                st.subheader("📊 Detailed Borrow Report History")
+                df_report = get_all_requests()
+                st.dataframe(df_report, use_container_width=True)
+                csv = df_report.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Download Report as CSV", data=csv, file_name="borrow_report.csv", mime="text/csv")
